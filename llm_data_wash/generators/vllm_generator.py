@@ -10,10 +10,6 @@ from llm_data_wash.utils.logger import get_logger
 from llm_data_wash.utils.concurrency import run_thread_pool
 from tqdm import tqdm
 
-
-
-
-
 logger = get_logger(__name__)
 
 class VLLMGenerator(BaseGenerator):
@@ -98,79 +94,73 @@ class VLLMGenerator(BaseGenerator):
     
     def process_batch(self, dataset: List[Dict]) -> List[Dict]:
         """
-        覆盖父类的处理逻辑，使用离线推理全量处理
+        修正：支持多轮对话中所有assistant回复的重生成
         """
         total_count = len(dataset)
         logger.info(f"开始离线推理处理：共 {total_count} 条数据")
         
         results = []
+        total_batches = (total_count + self.process_batch_size - 1) // self.process_batch_size
         
-        # 分块处理以避免内存一次性占用过大 (虽然 vLLM 可以处理，但 Python 侧列表过大也不好)
-        for i in range(0, total_count, self.process_batch_size):
-            batch_data = dataset[i : i + self.process_batch_size]
-            batch_prompts = []
-            batch_metadata = [] # 存储原始数据结构以便恢复
-            
-            # 1. 数据预处理 & 应用 Chat Template
-            for conv_item in batch_data:
-                # 获取对话列表
-                convs = conv_item.get("conversations", conv_item.get("items", []))
+        with tqdm(total=total_count, desc="整体处理进度", unit="条") as pbar:
+            for i in range(0, total_count, self.process_batch_size):
+                batch_data = dataset[i : i + self.process_batch_size]
+                batch_results = []
                 
-                # 提取 User 的输入构建 Prompt
-                # 注意：这里需要根据你的具体需求决定是保留历史还是只取最后一句
-                # 假设这里是标准的 Chat 格式
-                chat_messages = []
-                for msg in convs:
-                    if msg["from"] in ["human", "user"]:
-                        chat_messages.append({"role": "user", "content": msg["value"]})
-                    elif msg["from"] in ["gpt", "assistant"]:
-                        # 如果是重生成任务，通常需要截断到最后一个 User，或者把前面的 Assistant 也带上
-                        chat_messages.append({"role": "assistant", "content": msg["value"]})
+                # 逐样本处理（多轮重生成需要单样本逐轮推理）
+                for conv_item in batch_data:
+                    original_convs = conv_item.get("conversations", [])
+                    # 1. 拆分多轮对话：提取所有user和assistant的轮次（确保user和assistant交替）
+                    rounds = []  # 格式：[(user_content1, assistant_content1), (user_content2, assistant_content2)]
+                    current_user = None
+                    for msg in original_convs:
+                        if msg["from"] in ["human", "user"]:
+                            current_user = msg["value"]
+                        elif msg["from"] in ["gpt", "assistant"] and current_user is not None:
+                            rounds.append((current_user, msg["value"]))
+                            current_user = None
+                    
+                    # 2. 逐轮重生成assistant回复
+                    new_convs = []
+                    chat_history = []  # 保存已生成的对话历史（用于下一轮Prompt）
+                    for round_idx, (user_content, _) in enumerate(rounds):
+                        # 2.1 构造当前轮次的Prompt（只保留历史+当前user）
+                        current_chat = chat_history.copy()
+                        current_chat.append({"role": "user", "content": user_content})
+                        
+                        # 2.2 应用Chat Template（不包含任何原始assistant内容）
+                        prompt_str = self.tokenizer.apply_chat_template(
+                            current_chat,
+                            tokenize=False,
+                            add_generation_prompt=True  # 只在当前user后添加assistant生成提示符
+                        )
+                        
+                        # 2.3 单轮推理（生成当前轮次的assistant回复）
+                        outputs = self.llm.generate([prompt_str], self.sampling_params)
+                        new_assistant_content = outputs[0].outputs[0].text.strip()
+                        
+                        # 2.4 拼接新对话，并更新历史
+                        new_convs.append({"from": "human", "value": user_content})
+                        new_convs.append({"from": "gpt", "value": new_assistant_content})
+                        
+                        # 更新历史（用于下一轮Prompt）
+                        chat_history.append({"role": "user", "content": user_content})
+                        chat_history.append({"role": "assistant", "content": new_assistant_content})
+                    
+                    # 3. 构造最终结果
+                    batch_results.append({
+                        "id": conv_item.get("id", f"regenerated_{i + len(batch_results)}"),
+                        "conversations": new_convs
+                    })
                 
-                # 此时 chat_messages 应该是完整的历史。
-                # 如果我们要让模型生成回复，通常移除最后一个 Assistant 的回复（如果是重写）或确保最后是 User
-                # 这里假设你的逻辑是：给定 User 上下文，生成 Assistant 回复
-                
-                # 应用 Chat Template 转为 string
-                # apply_chat_template 会自动处理 system prompt 和特殊 token
-                prompt_str = self.tokenizer.apply_chat_template(
-                    chat_messages, 
-                    tokenize=False, 
-                    add_generation_prompt=True
-                )
-                
-                batch_prompts.append(prompt_str)
-                batch_metadata.append(conv_item)
-            
-            # 2. 执行推理 (核心步骤)
-            # vLLM 会自动处理 Padding, PagedAttention, Batching
-            outputs = self.llm.generate(batch_prompts, self.sampling_params)
-            
-            # 3. 结果回填
-            batch_results = []
-            for j, output in enumerate(outputs):
-                original_item = batch_metadata[j]
-                generated_text = output.outputs[0].text
-                
-                # 构造新的对话结构
-                new_convs = original_item.get("conversations", []).copy()
-                # 简单追加或替换逻辑，根据你的业务需求修改
-                new_convs.append({
-                    "from": "gpt",
-                    "value": generated_text
-                })
-                
-                batch_results.append({
-                    "id": original_item.get("id"),
-                    "conversations": new_convs
-                })
-            
-            results.extend(batch_results)
-            
-            # 实时保存当前批次
-            self.save_batch(batch_results, i // self.process_batch_size)
-            
-        logger.info("所有数据推理完成")
+                # 保存当前批次
+                self.save_batch(batch_results, i // self.process_batch_size)
+                results.extend(batch_results)
+                pbar.update(len(batch_data))
+        
+        # 合并所有批次
+        self._merge_batches(total_batches)
+        logger.info("所有数据推理完成并合并为完整文件")
         return results
     
     def save_batch(self, batch_data: List[Dict], batch_idx: int):
