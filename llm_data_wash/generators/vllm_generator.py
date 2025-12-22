@@ -20,35 +20,49 @@ class VLLMGenerator(BaseGenerator):
     """多卡vLLM数据重生成器"""
     
     def __init__(self, config: Dict):
-        # 绕过父类可能存在的 HTTP 初始化逻辑，如果父类强绑定了 HTTP，建议重构父类
-        # 这里假设只继承必要的配置读取逻辑
-        self.config = config
-        self.output_dir = config["output_dir"]
+        super().__init__(config)
         
+        # 1. 保持原有结构读取
         self.vllm_config = config["vllm"]
-        self.model_path = self.vllm_config["model_path"]
+        self.concurrency_config = config["concurrency"]
         
-        # 1. 初始化 vLLM 引擎
-        # tensor_parallel_size=8 意味着模型参数被切分到 8 张卡上并行计算
-        # 这种方式对于大模型推理吞吐量提升极其显著
-        logger.info(f"正在初始化 vLLM 引擎，模型路径: {self.model_path}, TP=8...")
+        # 2. 基础路径参数 (保持不变)
+        self.model_path = self.vllm_config["model_path"]
+        self.output_dir = config["data"]["output_dir"]
+        
+        # 3. 映射并发参数 (复用原有字段)
+        # 离线推理中，batch_size 决定一次喂给 GPU 的数据量，复用 concurrency.batch_size
+        self.batch_size = self.concurrency_config["batch_size"]
+        
+        # 4. 初始化 Tokenizer
+        logger.info(f"正在加载 Tokenizer: {self.model_path}")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_path, 
+            trust_remote_code=True
+        )
+
+        # 5. 初始化 vLLM 引擎 (读取 Config 中的新参数)
+        # 如果 config 里没写，我这里给了默认值作为兜底，但建议写在 config 里
+        tp_size = self.vllm_config.get("tensor_parallel_size", 1)
+        gpu_util = self.vllm_config.get("gpu_memory_utilization", 0.90)
+        max_len = self.vllm_config.get("max_model_len", 4096) 
+        
+        logger.info(f"初始化 vLLM: TP={tp_size}, MemUtil={gpu_util}, MaxLen={max_len}")
+        
         self.llm = LLM(
             model=self.model_path,
-            tensor_parallel_size=8, # 关键参数：利用 8 卡并行
-            gpu_memory_utilization=0.90, # 预留一点显存防止 OOM
+            tensor_parallel_size=tp_size,  # 关键：从配置读取 TP
+            gpu_memory_utilization=gpu_util,
+            max_model_len=max_len,
             trust_remote_code=True,
-            max_model_len=self.vllm_config.get("max_tokens", 4096) * 2 # 确保上下文长度足够
+            dtype="auto"
         )
         
-        # 2. 初始化 Tokenizer (用于应用 Chat Template)
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
-        
-        # 3. 设置采样参数
+        # 6. 采样参数 (保持不变)
         self.sampling_params = SamplingParams(
             temperature=self.vllm_config["temperature"],
             max_tokens=self.vllm_config["max_tokens"],
-            top_p=0.9,
-            stop=[]
+            top_p=0.9
         )
         
         # 批量处理大小 (离线推理可以设得很大，vLLM 会自动切分)

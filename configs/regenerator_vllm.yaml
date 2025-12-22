@@ -1,18 +1,26 @@
 # vLLM服务配置
 vllm:
+  # --- 废弃参数 (保留不动也没事) ---
   url: "http://localhost:8000/v1/chat/completions"
-  model_path: "/path/to/your/local/model"  # 本地模型路径
+  timeout: 60
+  min_api_interval: 0.01
+
+  # --- 核心保留参数 ---
+  model_path: "/workspace/Models/Llama-3.1-8B-Instruct"
   temperature: 0.7
   max_tokens: 2048
-  timeout: 60
-  min_api_interval: 0.01  # 8卡限流间隔
+
+  # --- 【必须新增】引擎参数 ---
+  tensor_parallel_size: 8      # 对应你的 8 卡环境，必须显式指定
+  gpu_memory_utilization: 0.90 # 显存占用率，默认 0.9。如果 OOM，调低到 0.85
+  max_model_len: 4096          # 上下文长度。注意：vLLM 可能会报模型本身的限制，需按需调整
 
 # 并行配置
 concurrency:
-  num_workers: 32  # 8卡建议16-32
-  batch_size: 1000  # 批次保存大小
+  num_workers: 32  # (代码中已忽略，离线推理不需要线程池)
+  batch_size: 1000 # (代码中已复用) 决定 process_batch 一次处理多少条
 
 # 数据配置
 data:
-  input_path: "/path/to/input/dataset.jsonl"  # 输入数据集
+  input_path: "/workspace/datasets/ultrachat_200k-test_sft_sft_shard000.json"  # 输入数据集
   output_dir: "./regenerated_data_8gpu"       # 输出目录
