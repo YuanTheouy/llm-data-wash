@@ -36,10 +36,10 @@ class VLLMGenerator(BaseGenerator):
             trust_remote_code=True
         )
 
-        # 5. 初始化 vLLM 引擎 (增强：显存适配+防崩溃参数)
+        # 5. 初始化 vLLM 引擎 (兼容旧版本vLLM)
         tp_size = self.vllm_config.get("tensor_parallel_size", 1)
         gpu_util = self.vllm_config.get("gpu_memory_utilization", 0.90)
-        # 核心修复：增大默认值+从配置读取
+        # 核心：读取配置文件的8192（已改好）
         max_len = self.vllm_config.get("max_model_len", 8192)  
         # 新增：可配置的生成参数和长度限制
         self.max_generate_tokens = self.vllm_config.get("max_tokens", 512)
@@ -51,6 +51,7 @@ class VLLMGenerator(BaseGenerator):
             f"MaxRounds={self.max_allowed_rounds}, SingleTurnMax={self.single_turn_max_tokens}"
         )
         
+        # ========== 兼容旧版本vLLM的引擎初始化 ==========
         self.llm = LLM(
             model=self.model_path,
             tensor_parallel_size=tp_size,
@@ -58,12 +59,11 @@ class VLLMGenerator(BaseGenerator):
             max_model_len=max_len,
             trust_remote_code=True,
             dtype="auto",
-            # 新增：防崩溃/显存优化参数
-            enable_chunked_prefill=True,  # 分块预填充超长Prompt
+            # 兼容旧版本的优化参数（删除enable_cuda_graph）
+            enable_chunked_prefill=True,  # 分块处理超长Prompt
             max_num_batched_tokens=8192,  # 匹配max_model_len
             max_num_seqs=2048,  # 增大并发序列数
-            swap_space=4,  # 显存不足时用CPU内存做KV缓存
-            enable_cuda_graph=False  # 关闭CUDA Graph适配多轮长度变化
+            swap_space=4  # 显存不足时用CPU内存
         )
         
         # 6. 采样参数 (增强：添加停止词)
@@ -77,8 +77,11 @@ class VLLMGenerator(BaseGenerator):
         # 批量处理大小 (8卡建议设为2000)
         self.process_batch_size = config["concurrency"].get("batch_size", 2000 if tp_size >=8 else 1000)
         
-        # 创建输出目录
+        # 创建输出目录（绝对路径，不会找不到）
         os.makedirs(self.output_dir, exist_ok=True)
+        # 打印绝对路径，确保你能找到
+        logger.info(f"✅ 输出目录已创建（绝对路径）：{os.path.abspath(self.output_dir)}")
+        print(f"\n📌 数据将保存到：{os.path.abspath(self.output_dir)}\n")
 
     def process_single(self, conversation: Dict, idx: int) -> Dict:
         """处理单条对话（实现抽象方法，兼容原有接口）"""

@@ -13,7 +13,7 @@ vllm:
   # --- 【必须新增】引擎参数 ---
   tensor_parallel_size: 8      # 对应你的 8 卡环境，必须显式指定
   gpu_memory_utilization: 0.90 # 显存占用率，默认 0.9。如果 OOM，调低到 0.85
-  max_model_len: 4096          # 上下文长度。注意：vLLM 可能会报模型本身的限制，需按需调整
+  max_model_len: 8192          # 上下文长度。注意：vLLM 可能会报模型本身的限制，需按需调整
 
 # 并行配置
 concurrency:
@@ -23,4 +23,4 @@ concurrency:
 # 数据配置
 data:
   input_path: "/workspace/datasets/ultrachat_200k-test_sft_sft_shard000.json"  # 输入数据集
-  output_dir: "./regenerated_data_8gpu"       # 输出目录
+  output_dir: "/workspace/regenerated_data_8gpu"       # 输出目录
