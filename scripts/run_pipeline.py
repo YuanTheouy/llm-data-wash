@@ -33,7 +33,7 @@ def load_local_dataset(data_path: str) -> list:
 
 def main():
     # 1. 加载配置
-    config = load_config("./configs/regen_vllm.yaml")
+    config = load_config("./configs/regenerator_vllm.yaml")
     
     # 2. 加载数据集
     dataset = load_local_dataset(config["data"]["input_path"])
