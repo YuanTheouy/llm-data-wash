@@ -1,0 +1,6 @@
+requests>=2.31.0
+tqdm>=4.66.0
+pyyaml>=6.0.1
+pynvml>=11.5.0
+vllm>=0.4.0
+pyarrow>=14.0.0  # 后续扩展Parquet加载用

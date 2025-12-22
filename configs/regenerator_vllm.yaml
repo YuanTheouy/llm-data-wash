@@ -1,0 +1,18 @@
+# vLLM服务配置
+vllm:
+  url: "http://localhost:8000/v1/chat/completions"
+  model_path: "/path/to/your/local/model"  # 本地模型路径
+  temperature: 0.7
+  max_tokens: 2048
+  timeout: 60
+  min_api_interval: 0.01  # 8卡限流间隔
+
+# 并行配置
+concurrency:
+  num_workers: 32  # 8卡建议16-32
+  batch_size: 1000  # 批次保存大小
+
+# 数据配置
+data:
+  input_path: "/path/to/input/dataset.jsonl"  # 输入数据集
+  output_dir: "./regenerated_data_8gpu"       # 输出目录
