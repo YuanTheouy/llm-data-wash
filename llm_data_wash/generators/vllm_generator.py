@@ -8,6 +8,7 @@ from llm_data_wash.core.base_generator import BaseGenerator
 from llm_data_wash.utils.gpu_monitor import GPUMonitor
 from llm_data_wash.utils.logger import get_logger
 from llm_data_wash.utils.concurrency import run_thread_pool
+import tqdm
 
 logger = get_logger(__name__)
 
@@ -35,7 +36,7 @@ class VLLMGenerator(BaseGenerator):
         # self.result_lock = threading.Lock()
         # self.last_api_call = 0
         self.num_workers = config["concurrency"]["num_workers"] if config["concurrency"]["num_workers"] > 32 else 64
-        
+
         # 初始化GPU监控
         self.gpu_monitor = GPUMonitor(gpu_count=8)
     
