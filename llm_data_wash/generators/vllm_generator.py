@@ -8,7 +8,7 @@ from llm_data_wash.core.base_generator import BaseGenerator
 from llm_data_wash.utils.gpu_monitor import GPUMonitor
 from llm_data_wash.utils.logger import get_logger
 from llm_data_wash.utils.concurrency import run_thread_pool
-import tqdm
+from tqdm import tqdm
 
 logger = get_logger(__name__)
 
