@@ -1,14 +1,18 @@
 import json
-import requests
-import time
 import os
 import threading
 from typing import List, Dict
 from llm_data_wash.core.base_generator import BaseGenerator
 from llm_data_wash.utils.gpu_monitor import GPUMonitor
+from vllm import LLM, SamplingParams
+from transformers import AutoTokenizer
 from llm_data_wash.utils.logger import get_logger
 from llm_data_wash.utils.concurrency import run_thread_pool
 from tqdm import tqdm
+
+
+
+
 
 logger = get_logger(__name__)
 
@@ -16,100 +20,40 @@ class VLLMGenerator(BaseGenerator):
     """多卡vLLM数据重生成器"""
     
     def __init__(self, config: Dict):
-        super().__init__(config)
+        # 绕过父类可能存在的 HTTP 初始化逻辑，如果父类强绑定了 HTTP，建议重构父类
+        # 这里假设只继承必要的配置读取逻辑
+        self.config = config
+        self.output_dir = config["output_dir"]
         
-        # 加载vLLM配置
         self.vllm_config = config["vllm"]
-        self.vllm_url = self.vllm_config["url"]
         self.model_path = self.vllm_config["model_path"]
-        self.temperature = self.vllm_config["temperature"]
-        self.max_tokens = self.vllm_config["max_tokens"]
-        self.timeout = self.vllm_config["timeout"]
-        self.min_api_interval = self.vllm_config["min_api_interval"]
         
-        # 加载并行配置
-        self.num_workers = config["concurrency"]["num_workers"]
-        self.batch_size = config["concurrency"]["batch_size"]
+        # 1. 初始化 vLLM 引擎
+        # tensor_parallel_size=8 意味着模型参数被切分到 8 张卡上并行计算
+        # 这种方式对于大模型推理吞吐量提升极其显著
+        logger.info(f"正在初始化 vLLM 引擎，模型路径: {self.model_path}, TP=8...")
+        self.llm = LLM(
+            model=self.model_path,
+            tensor_parallel_size=8, # 关键参数：利用 8 卡并行
+            gpu_memory_utilization=0.90, # 预留一点显存防止 OOM
+            trust_remote_code=True,
+            max_model_len=self.vllm_config.get("max_tokens", 4096) * 2 # 确保上下文长度足够
+        )
         
-        # # 线程安全
-        # self.api_lock = threading.Lock()
-        # self.result_lock = threading.Lock()
-        # self.last_api_call = 0
-        self.num_workers = config["concurrency"]["num_workers"] if config["concurrency"]["num_workers"] > 32 else 64
-
-        # 初始化GPU监控
-        self.gpu_monitor = GPUMonitor(gpu_count=8)
-    
-    def call_vllm_api(self, prompt: str) -> str:
-        """调用vLLM API"""
-        try:
-            # API限流
-            with self.api_lock:
-                current_time = time.time()
-                time_since_last = current_time - self.last_api_call
-                if time_since_last < self.min_api_interval:
-                    time.sleep(self.min_api_interval - time_since_last)
-                self.last_api_call = current_time
-            
-            # 构造请求
-            payload = {
-                "model": self.model_path,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
-                "stop": [],
-                "top_p": 0.9,
-                "frequency_penalty": 0.0
-            }
-            
-            response = requests.post(
-                self.vllm_url,
-                json=payload,
-                timeout=self.timeout,
-                headers={"Content-Type": "application/json"}
-            )
-            response.raise_for_status()
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
+        # 2. 初始化 Tokenizer (用于应用 Chat Template)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
         
-        except Exception as e:
-            logger.error(f"vLLM API调用失败: {e}")
-            return ""
-
-    def call_vllm_batch_api(self, prompts: List[str]) -> List[str]:
-        """批量调用vLLM API（一次处理多条prompt）"""
-        try:
-            # 构造批量请求（vLLM支持batch chat completions）
-            payload = {
-                "model": self.model_path,
-                "messages": [
-                    [{"role": "user", "content": prompt}] for prompt in prompts
-                ],
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
-                "stop": [],
-                "top_p": 0.9,
-                "frequency_penalty": 0.0,
-                "n": 1  # 每条prompt生成1个回答
-            }
-            
-            response = requests.post(
-                self.vllm_url,
-                json=payload,
-                timeout=self.timeout * 5,  # 批量请求超时稍长
-                headers={"Content-Type": "application/json"}
-            )
-            response.raise_for_status()
-            result = response.json()
-            
-            # 解析批量结果
-            answers = [choice["message"]["content"] for choice in result["choices"]]
-            return answers
+        # 3. 设置采样参数
+        self.sampling_params = SamplingParams(
+            temperature=self.vllm_config["temperature"],
+            max_tokens=self.vllm_config["max_tokens"],
+            top_p=0.9,
+            stop=[]
+        )
         
-        except Exception as e:
-            logger.error(f"vLLM批量API调用失败: {e}")
-            # 失败时返回空字符串，保证长度匹配
-            return [""] * len(prompts)
+        # 批量处理大小 (离线推理可以设得很大，vLLM 会自动切分)
+        # 这里指一次性喂给 engine 的 prompt 数量
+        self.process_batch_size = config["concurrency"].get("batch_size", 1000)
 
     def process_single(self, conversation: Dict, idx: int) -> Dict:
         """处理单条对话（实现抽象方法）"""
@@ -138,69 +82,81 @@ class VLLMGenerator(BaseGenerator):
             "conversations": new_convos
         }
     
-    # 修改process_batch方法：先收集所有prompt，再批量调用
     def process_batch(self, dataset: List[Dict]) -> List[Dict]:
+        """
+        覆盖父类的处理逻辑，使用离线推理全量处理
+        """
         total_count = len(dataset)
-        logger.info(f"开始批量处理：共{total_count}条对话 | 批量大小{self.batch_size}")
-        
-        self.gpu_monitor.start_monitor(interval=10)
+        logger.info(f"开始离线推理处理：共 {total_count} 条数据")
         
         results = []
-        # 分大批次处理（每batch_size条为一个大批次，批量调用API）
-        for batch_start in tqdm(range(0, total_count, self.batch_size), desc="大批次进度"):
-            batch_end = min(batch_start + self.batch_size, total_count)
-            batch_dataset = dataset[batch_start:batch_end]
-            
-            # 第一步：收集当前批次的所有prompt
+        
+        # 分块处理以避免内存一次性占用过大 (虽然 vLLM 可以处理，但 Python 侧列表过大也不好)
+        for i in range(0, total_count, self.process_batch_size):
+            batch_data = dataset[i : i + self.process_batch_size]
             batch_prompts = []
-            batch_convos = []  # 保存每条对话的原始结构
-            for idx, conv in enumerate(batch_dataset):
-                convos = conv.get("conversations", conv.get("items", conv.get("messages", [])))
-                context = ""
-                new_convos = []
-                # 拼接上下文，收集需要生成的prompt
-                for msg in convos:
-                    role = msg.get("from") or msg.get("role")
-                    content = msg.get("value") or msg.get("content")
-                    if role in ["human", "user"]:
-                        new_convos.append({"from": "human", "value": content})
-                        context += f"Human: {content}\n\n"
-                    elif role in ["gpt", "assistant"]:
-                        prompt = f"{context}Assistant:"
-                        batch_prompts.append(prompt)
-                        # 暂存当前状态，后续填充回答
-                        batch_convos.append({
-                            "idx": batch_start + idx,
-                            "context": context,
-                            "new_convos": new_convos,
-                            "original_conv": conv
-                        })
-                        break  # 假设每条对话只有1轮助手回答，可根据实际调整
+            batch_metadata = [] # 存储原始数据结构以便恢复
             
-            # 第二步：批量调用API生成回答
-            batch_answers = self.call_vllm_batch_api(batch_prompts)
+            # 1. 数据预处理 & 应用 Chat Template
+            for conv_item in batch_data:
+                # 获取对话列表
+                convs = conv_item.get("conversations", conv_item.get("items", []))
+                
+                # 提取 User 的输入构建 Prompt
+                # 注意：这里需要根据你的具体需求决定是保留历史还是只取最后一句
+                # 假设这里是标准的 Chat 格式
+                chat_messages = []
+                for msg in convs:
+                    if msg["from"] in ["human", "user"]:
+                        chat_messages.append({"role": "user", "content": msg["value"]})
+                    elif msg["from"] in ["gpt", "assistant"]:
+                        # 如果是重生成任务，通常需要截断到最后一个 User，或者把前面的 Assistant 也带上
+                        chat_messages.append({"role": "assistant", "content": msg["value"]})
+                
+                # 此时 chat_messages 应该是完整的历史。
+                # 如果我们要让模型生成回复，通常移除最后一个 Assistant 的回复（如果是重写）或确保最后是 User
+                # 这里假设你的逻辑是：给定 User 上下文，生成 Assistant 回复
+                
+                # 应用 Chat Template 转为 string
+                # apply_chat_template 会自动处理 system prompt 和特殊 token
+                prompt_str = self.tokenizer.apply_chat_template(
+                    chat_messages, 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                )
+                
+                batch_prompts.append(prompt_str)
+                batch_metadata.append(conv_item)
             
-            # 第三步：填充回答，构造结果
-            for i, answer in enumerate(batch_answers):
-                conv_info = batch_convos[i]
-                context = conv_info["context"]
-                new_convos = conv_info["new_convos"]
-                # 补充助手回答
-                new_convos.append({"from": "gpt", "value": answer})
-                # 构造最终结果
-                results.append({
-                    "id": conv_info["original_conv"].get("id", f"regenerated_{conv_info['idx']}"),
-                    "conversations": new_convos
+            # 2. 执行推理 (核心步骤)
+            # vLLM 会自动处理 Padding, PagedAttention, Batching
+            outputs = self.llm.generate(batch_prompts, self.sampling_params)
+            
+            # 3. 结果回填
+            batch_results = []
+            for j, output in enumerate(outputs):
+                original_item = batch_metadata[j]
+                generated_text = output.outputs[0].text
+                
+                # 构造新的对话结构
+                new_convs = original_item.get("conversations", []).copy()
+                # 简单追加或替换逻辑，根据你的业务需求修改
+                new_convs.append({
+                    "from": "gpt",
+                    "value": generated_text
+                })
+                
+                batch_results.append({
+                    "id": original_item.get("id"),
+                    "conversations": new_convs
                 })
             
-            # 保存当前大批次结果
-            self.save_batch(results[-len(batch_dataset):], batch_start // self.batch_size)
-        
-        # 合并批次
-        self._merge_batches(len(results) // self.batch_size + 1)
-        self.gpu_monitor.stop_monitor()
-        
-        logger.info(f"批量处理完成：共生成{len(results)}条有效数据")
+            results.extend(batch_results)
+            
+            # 实时保存当前批次
+            self.save_batch(batch_results, i // self.process_batch_size)
+            
+        logger.info("所有数据推理完成")
         return results
     
     def save_batch(self, batch_data: List[Dict], batch_idx: int):
