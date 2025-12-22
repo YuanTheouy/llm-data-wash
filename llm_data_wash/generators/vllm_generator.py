@@ -94,7 +94,7 @@ class VLLMGenerator(BaseGenerator):
     
     def process_batch(self, dataset: List[Dict]) -> List[Dict]:
         """
-        修正：支持多轮对话中所有assistant回复的重生成
+        优化：按轮次批量推理，兼顾多轮重生成和vLLM批量效率
         """
         total_count = len(dataset)
         logger.info(f"开始离线推理处理：共 {total_count} 条数据")
@@ -105,13 +105,18 @@ class VLLMGenerator(BaseGenerator):
         with tqdm(total=total_count, desc="整体处理进度", unit="条") as pbar:
             for i in range(0, total_count, self.process_batch_size):
                 batch_data = dataset[i : i + self.process_batch_size]
-                batch_results = []
+                batch_size = len(batch_data)
                 
-                # 逐样本处理（多轮重生成需要单样本逐轮推理）
-                for conv_item in batch_data:
+                # 步骤1：预处理所有样本，拆分多轮对话
+                batch_rounds = []  # 每个样本的轮次信息：[(user1, _), (user2, _), ...]
+                batch_chat_history = [[] for _ in range(batch_size)]  # 每个样本的对话历史
+                batch_new_convs = [[] for _ in range(batch_size)]  # 每个样本的最终新对话
+                
+                max_rounds = 0  # 批次内样本的最大轮次数
+                for idx, conv_item in enumerate(batch_data):
                     original_convs = conv_item.get("conversations", [])
-                    # 1. 拆分多轮对话：提取所有user和assistant的轮次（确保user和assistant交替）
-                    rounds = []  # 格式：[(user_content1, assistant_content1), (user_content2, assistant_content2)]
+                    # 拆分轮次（user+assistant为一轮）
+                    rounds = []
                     current_user = None
                     for msg in original_convs:
                         if msg["from"] in ["human", "user"]:
@@ -119,38 +124,52 @@ class VLLMGenerator(BaseGenerator):
                         elif msg["from"] in ["gpt", "assistant"] and current_user is not None:
                             rounds.append((current_user, msg["value"]))
                             current_user = None
+                    batch_rounds.append(rounds)
+                    max_rounds = max(max_rounds, len(rounds))
+                
+                # 步骤2：按轮次批量推理（核心优化）
+                for round_idx in range(max_rounds):
+                    # 收集当前轮次需要推理的Prompt
+                    round_prompts = []
+                    round_sample_indices = []  # 记录哪些样本有当前轮次
                     
-                    # 2. 逐轮重生成assistant回复
-                    new_convs = []
-                    chat_history = []  # 保存已生成的对话历史（用于下一轮Prompt）
-                    for round_idx, (user_content, _) in enumerate(rounds):
-                        # 2.1 构造当前轮次的Prompt（只保留历史+当前user）
-                        current_chat = chat_history.copy()
-                        current_chat.append({"role": "user", "content": user_content})
-                        
-                        # 2.2 应用Chat Template（不包含任何原始assistant内容）
-                        prompt_str = self.tokenizer.apply_chat_template(
-                            current_chat,
-                            tokenize=False,
-                            add_generation_prompt=True  # 只在当前user后添加assistant生成提示符
-                        )
-                        
-                        # 2.3 单轮推理（生成当前轮次的assistant回复）
-                        outputs = self.llm.generate([prompt_str], self.sampling_params)
-                        new_assistant_content = outputs[0].outputs[0].text.strip()
-                        
-                        # 2.4 拼接新对话，并更新历史
-                        new_convs.append({"from": "human", "value": user_content})
-                        new_convs.append({"from": "gpt", "value": new_assistant_content})
-                        
-                        # 更新历史（用于下一轮Prompt）
-                        chat_history.append({"role": "user", "content": user_content})
-                        chat_history.append({"role": "assistant", "content": new_assistant_content})
+                    for sample_idx in range(batch_size):
+                        rounds = batch_rounds[sample_idx]
+                        if round_idx < len(rounds):
+                            # 提取当前轮次的user内容
+                            user_content, _ = rounds[round_idx]
+                            # 构造Prompt（历史+当前user）
+                            current_chat = batch_chat_history[sample_idx].copy()
+                            current_chat.append({"role": "user", "content": user_content})
+                            # 应用Chat Template
+                            prompt_str = self.tokenizer.apply_chat_template(
+                                current_chat,
+                                tokenize=False,
+                                add_generation_prompt=True
+                            )
+                            round_prompts.append(prompt_str)
+                            round_sample_indices.append(sample_idx)
                     
-                    # 3. 构造最终结果
+                    # 批量推理当前轮次（关键：vLLM批量处理）
+                    if round_prompts:
+                        outputs = self.llm.generate(round_prompts, self.sampling_params)
+                        # 回填当前轮次结果
+                        for output_idx, output in enumerate(outputs):
+                            sample_idx = round_sample_indices[output_idx]
+                            new_assistant = output.outputs[0].text.strip()
+                            # 更新该样本的对话历史
+                            batch_chat_history[sample_idx].append({"role": "user", "content": batch_rounds[sample_idx][round_idx][0]})
+                            batch_chat_history[sample_idx].append({"role": "assistant", "content": new_assistant})
+                            # 更新该样本的最终对话
+                            batch_new_convs[sample_idx].append({"from": "human", "value": batch_rounds[sample_idx][round_idx][0]})
+                            batch_new_convs[sample_idx].append({"from": "gpt", "value": new_assistant})
+                
+                # 步骤3：构造批次结果
+                batch_results = []
+                for idx, conv_item in enumerate(batch_data):
                     batch_results.append({
-                        "id": conv_item.get("id", f"regenerated_{i + len(batch_results)}"),
-                        "conversations": new_convs
+                        "id": conv_item.get("id", f"regenerated_{i + idx}"),
+                        "conversations": batch_new_convs[idx]
                     })
                 
                 # 保存当前批次
