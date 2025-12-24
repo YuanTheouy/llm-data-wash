@@ -2,9 +2,9 @@
 vllm:
   # --- API 配置 ---
   vllm_url: "http://localhost:8000/v1/chat/completions"
-  model_name: "/workspace/Models/Llama-3.1-8B-Instruct"  # API调用时指定的模型名称 (通常就是模型路径)
-  timeout: 60
-  min_api_interval: 0.1
+  model_name: "/workspace/Models/Llama-3.1-8B-Instruct"  # API调用时指定的模型名称
+  timeout: 120            # 建议适当调大超时时间，防止并发高时排队超时
+  min_api_interval: 0     # 设为0，全力发送请求，不需要人为限速
 
   # --- 生成参数 ---
   temperature: 0.7
@@ -15,11 +15,13 @@ vllm:
 
 # 并行配置
 concurrency:
-  num_threads: 32     # API 请求并发线程数
-  batch_size: 1000    # 批次保存大小
-  batch_save: 10      # 每处理多少条保存一次 (对应 regen.py)
+  num_threads: 256    # 【关键调整】8卡并发能力很强，32太少喂不饱，建议开到 128~256
+  batch_save: 500     # 【已修正】每处理 500 条保存一个文件。之前 10 条太频，1000 条风险略大
+  # batch_size: 1000  # 【已删除】这个参数已废弃，避免混淆
 
 # 数据配置
 data:
   input_path: "/workspace/datasets/ultrachat_200k-test_sft_sft_shard000.json"  # 输入数据集
   output_dir: "/workspace/regenerated_data_api"       # 输出目录
+
+
