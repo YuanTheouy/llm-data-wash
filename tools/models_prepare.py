@@ -28,9 +28,11 @@ MODEL_CONFIGS = [
     {
         "model_name": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
         "local_dir": "./Models/EAGLE3-LLaMA3.1-Instruct-8B/"
+    },
+        {
+        "model_name": "GSAI-ML/LLaDA-V",
+        "local_dir": "./Models/LLaDA-V/"
     }
-
-
 ]
 HF_TOKEN = ""
 for config in MODEL_CONFIGS:
