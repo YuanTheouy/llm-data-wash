@@ -5,5 +5,11 @@
 ### 1. 安装
 ```bash
 git clone https://github.com/YuanTheouy/llm-data-wash.git
+
+python -m venv ~/venvs/datawash_env
+source ~/venvs/datawash_env/bin/activate
+
 cd llm-data-wash
 pip install .
+
+
