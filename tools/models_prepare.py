@@ -21,18 +21,18 @@ MODEL_CONFIGS = [
     #     "model_name": "Tengyunw/qwen3_8b_eagle3",
     #     "local_dir": "../Models/qwen3_8b_eagle3/"
     # }
-    # {
-    #     "model_name": "meta-llama/Llama-3.1-8B-Instruct",
-    #     "local_dir": "./Models/Llama-3.1-8B-Instruct/"
-    # },
-    # {
-    #     "model_name": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
-    #     "local_dir": "./Models/EAGLE3-LLaMA3.1-Instruct-8B/"
-    # },
     {
-        "model_name": "GSAI-ML/LLaDA-V",
-        "local_dir": "./Models/LLaDA-V/"
-    }
+        "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+        "local_dir": "./Models/Llama-3.1-8B-Instruct/"
+    },
+    {
+        "model_name": "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+        "local_dir": "./Models/EAGLE3-LLaMA3.1-Instruct-8B/"
+    },
+    # {
+    #     "model_name": "GSAI-ML/LLaDA-V",
+    #     "local_dir": "./Models/LLaDA-V/"
+    # }
 ]
 HF_TOKEN = ""
 for config in MODEL_CONFIGS:
