@@ -30,9 +30,13 @@ MODEL_CONFIGS = [
     #     "local_dir": "./Models/EAGLE3-LLaMA3.1-Instruct-8B/"
     # },
     {
-        "model_name": "GSAI-ML/LLaDA-V",
-        "local_dir": "./Models/LLaDA-V/"
+        "model_name": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "local_dir": "/workspace/Models/Qwen2.5-VL-7B-Instruct/"
     }
+    # {
+    #     "model_name": "GSAI-ML/LLaDA-V",
+    #     "local_dir": "./Models/LLaDA-V/"
+    # }
 ]
 HF_TOKEN = ""
 for config in MODEL_CONFIGS:
