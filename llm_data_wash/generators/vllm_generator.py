@@ -3,6 +3,7 @@ import os
 import time
 import requests
 import threading
+import base64
 import concurrent.futures
 from typing import List, Dict, Optional
 from tqdm import tqdm
@@ -41,7 +42,20 @@ class VLLMGenerator(BaseGenerator):
         
         logger.info(f"初始化 VLLMGenerator (API模式): URL={self.vllm_url}, Model={self.model_name}, Threads={self.num_threads}")
 
-    def call_vllm_api(self, prompt: str) -> str:
+    def encode_image(self, image_path: str) -> str:
+        """将本地图片转换为Base64字符串"""
+        if not os.path.exists(image_path):
+            logger.warning(f"图片文件不存在: {image_path}")
+            return ""
+        
+        try:
+            with open(image_path, "rb") as image_file:
+                return base64.b64encode(image_file.read()).decode('utf-8')
+        except Exception as e:
+            logger.error(f"图片编码失败 {image_path}: {e}")
+            return ""
+
+    def call_vllm_api(self, messages: List[Dict]) -> str:
         """调用vLLM API生成回答"""
         try:
             # 简单的速率限制
@@ -54,9 +68,7 @@ class VLLMGenerator(BaseGenerator):
 
             payload = {
                 "model": self.model_name,
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ],
+                "messages": messages,
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
                 "stop": []  # 可根据需要添加停止词
@@ -90,36 +102,60 @@ class VLLMGenerator(BaseGenerator):
                 conversations_list = conversation.get("messages", [])
 
         new_conversations = []
-        context = ""
+        # 维护用于API调用的消息列表
+        api_messages = []
 
         for msg in conversations_list:
             role = msg.get("from") or msg.get("role")
             content = msg.get("value") or msg.get("content")
+            image = msg.get("image") or msg.get("image_path")
 
-            # 如果是人类消息，保持不变并添加到上下文
+            # 如果是人类消息，添加到消息列表
             if role in ["human", "user"]:
-                new_conversations.append({
+                # 构建API消息
+                user_msg_api = {"role": "user", "content": content}
+                if image:
+                    # 如果有图片，构造多模态消息 (使用Base64)
+                    base64_image = self.encode_image(image)
+                    if base64_image:
+                        user_msg_api["content"] = [
+                            {"type": "text", "text": content},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                        ]
+                    else:
+                        # 图片加载失败，退化为纯文本
+                        logger.warning(f"图片加载失败，退化为纯文本: {image}")
+                
+                # 如果没有图片，user_msg_api 保持 {"role": "user", "content": "..."} 的纯文本格式
+                # Qwen2.5-VL 完全支持这种纯文本输入格式
+                
+                api_messages.append(user_msg_api)
+                
+                # 添加到新对话记录
+                new_msg = {
                     "from": "human",
                     "value": content
-                })
-                context += f"Human: {content}\n\n"
+                }
+                if image:
+                    new_msg["image"] = image
+                new_conversations.append(new_msg)
 
             # 如果是助手消息，使用vLLM重新生成
             elif role in ["gpt", "assistant"]:
-                # 准备提示，包含之前的上下文
-                prompt = f"{context}Assistant:"
-                
                 # 调用vLLM生成新回答
-                new_response = self.call_vllm_api(prompt)
+                new_response = self.call_vllm_api(api_messages)
+                
+                # 将生成的回答加入历史，供后续轮次使用
+                api_messages.append({
+                    "role": "assistant",
+                    "content": new_response
+                })
                 
                 new_conversations.append({
                     "from": "gpt",
                     "value": new_response
                 })
                 
-                # 更新上下文，添加新的回答
-                context += f"Assistant: {new_response}\n\n"
-
         return {
             "id": conversation.get("id", f"regenerated_{idx}"),
             "conversations": new_conversations
@@ -193,17 +229,29 @@ class VLLMGenerator(BaseGenerator):
     def _merge_batches(self, all_data: List[Dict]):
         """保存完整结果"""
         try:
+            # 检查是否有自定义的最终输出路径
+            final_output_path = self.config.get("data", {}).get("final_output_path")
+            
+            if final_output_path:
+                # 如果指定了具体文件路径，直接保存到该路径
+                merge_jsonl = final_output_path
+                # 确保父目录存在
+                os.makedirs(os.path.dirname(merge_jsonl), exist_ok=True)
+            else:
+                # 否则保存到 output_dir 下的默认文件名
+                merge_jsonl = os.path.join(self.output_dir, "regenerated_complete.jsonl")
+            
             # 保存 JSONL
-            merge_jsonl = os.path.join(self.output_dir, "regenerated_complete.jsonl")
             with open(merge_jsonl, "w", encoding="utf-8") as f:
                 for item in all_data:
                     f.write(json.dumps(item, ensure_ascii=False) + "\n")
             
-            # 保存 JSON
-            merge_json = os.path.join(self.output_dir, "regenerated_complete.json")
-            with open(merge_json, "w", encoding="utf-8") as f:
-                json.dump(all_data, f, ensure_ascii=False, indent=2)
+            # 只有在没有指定特定文件路径时，才保存额外的 JSON 格式备份，避免混乱
+            if not final_output_path:
+                merge_json = os.path.join(self.output_dir, "regenerated_complete.json")
+                with open(merge_json, "w", encoding="utf-8") as f:
+                    json.dump(all_data, f, ensure_ascii=False, indent=2)
                 
-            logger.info(f"所有数据处理完成！共 {len(all_data)} 条，已保存至 {self.output_dir}")
+            logger.info(f"所有数据处理完成！共 {len(all_data)} 条，已保存至 {merge_jsonl}")
         except Exception as e:
             logger.error(f"保存最终结果失败：{e}")

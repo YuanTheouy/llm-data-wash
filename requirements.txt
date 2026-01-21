@@ -1,26 +1,6 @@
-# 基础工具类依赖
 requests>=2.31.0
 tqdm>=4.66.0
 pyyaml>=6.0.1
 pynvml>=11.5.0
-pyarrow>=14.0.0
-huggingface_hub
-
-# 深度学习/框架类依赖
-torch==2.6.0
-transformers==4.53.1
-accelerate==0.26.0
-fschat>=0.2.31
-gradio>=3.50.2
-openai==0.28.0
-anthropic==0.5.0
-sentencepiece==0.1.99
-protobuf==3.19.0
-wandb
-datasets
-deepspeed==0.16.0
-shortuuid
-ray
-
-# vllm（单独指定源，避免NCCL坑）
-vllm==0.4.0 --extra-index-url https://download.vllm.ai/whl/cu121
+vllm>=0.4.0
+pyarrow>=14.0.0  # 后续扩展Parquet加载用

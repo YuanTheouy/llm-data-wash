@@ -1,0 +1,21 @@
+# vLLM服务配置
+vllm:
+  # --- API 配置 ---
+  vllm_url: "http://localhost:8000/v1/chat/completions"
+  model_name: "llava-hf/llava-1.5-7b-hf"  # 请修改为您实际部署的多模态模型名称
+  timeout: 120            # 建议适当调大超时时间
+  min_api_interval: 0     # 设为0，全力发送请求
+
+  # --- 生成参数 ---
+  temperature: 0.2        # VQA通常需要较低的temperature以获得准确回答
+  max_tokens: 512
+  
+# 并行配置
+concurrency:
+  num_threads: 32         # 根据API承载能力调整
+  batch_save: 100         # 每处理100条保存一次
+
+# 数据配置
+data:
+  input_path: "datasets/VQAv2/vqa_v2_validation.jsonl"  # 指向下载脚本生成的对应文件
+  output_dir: "regenerated_data_vqa"                    # 输出目录

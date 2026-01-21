@@ -1,0 +1,23 @@
+# vLLM服务配置 - Qwen2.5-VL 处理纯文本任务
+vllm:
+  # --- API 配置 ---
+  vllm_url: "http://localhost:8000/v1/chat/completions"
+  model_name: "/workspace/Models/Qwen2.5-VL-7B-Instruct"  # 服务端加载的模型路径
+  timeout: 120            # 纯文本处理相对较快，但仍保持一定余量
+  min_api_interval: 0     # 设为0，全力发送请求
+
+  # --- 生成参数 ---
+  temperature: 0.7        # 纯文本对话通常使用较高的 temperature 以增加多样性，如果是知识问答可降低
+  max_tokens: 2048        # 纯文本输出通常较长
+  
+# 并行配置
+concurrency:
+  num_threads: 64         # 纯文本任务显存压力较小，可以保持较高并发
+  batch_save: 100         # 每处理100条保存一次
+
+# 数据配置
+data:
+  # 请修改为 UltraChat 数据集的实际路径
+  input_path: "/workspace/datasets/ultrachat_200k/test_sft.json"  
+  output_dir: "/workspace/datasets/ultrachat_200k/regenerated_temp"           
+  final_output_path: "/workspace/datasets/ultrachat_200k/ultrachat_regenerated.jsonl" 

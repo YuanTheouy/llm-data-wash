@@ -28,12 +28,38 @@ def load_local_dataset(data_path: str) -> list:
     else:
         raise ValueError(f"不支持的数据集格式：{data_path}")
     
-    logger.info(f"加载数据集完成：共{len(data)}条对话")
-    return data
+    # 数据标准化：检查是否为VQA格式并转换
+    normalized_data = []
+    for item in data:
+        # 检查是否为VQA格式 (包含 image_path 和 question)
+        if "image_path" in item and "question" in item:
+             normalized_data.append({
+                 "id": str(item.get("question_id", "")),
+                 "conversations": [
+                     {
+                         "from": "human",
+                         "value": item["question"],
+                         "image_path": item["image_path"]
+                     },
+                     {
+                         "from": "gpt",
+                         "value": "" # 占位符，触发重新生成
+                     }
+                 ],
+                 # 保留原始元数据
+                 "original_answers": item.get("original_answers"),
+                 "question_type": item.get("question_type")
+             })
+        else:
+             normalized_data.append(item)
+    
+    logger.info(f"加载数据集完成：共{len(normalized_data)}条对话")
+    return normalized_data
 
 def main():
     # 1. 加载配置
-    config = load_config("./configs/regenerator_vllm.yaml")
+    # config = load_config("./configs/regenerator_vllm.yaml")
+    config = load_config("./configs/regenerator_qwen_vl.yaml")
     
     # 2. 加载数据集
     dataset = load_local_dataset(config["data"]["input_path"])
