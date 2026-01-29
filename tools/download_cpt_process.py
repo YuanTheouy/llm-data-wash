@@ -129,7 +129,7 @@ def estimate_avg_sample_size(ds_config, cache_dir, estimate_cnt):
     print(f"✅ {ds_name}[{config_name}] 预采样{valid_count}条，平均单样本：{avg_size:.2f} Bytes")
     return avg_size, text_field
 
-def stream_collect_dataset_to_temp(ds_config, cache_dir, temp_dir, estimate_cnt):
+def stream_collect_dataset_to_temp(ds_config, cache_dir, temp_dir, estimate_cnt, token=None):
     """
     流式采样并写入临时文件，避免内存溢出
     """
