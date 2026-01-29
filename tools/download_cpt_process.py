@@ -6,6 +6,16 @@ nvidia/Nemotron-CC-Math-v1 仅从4plus子数据集采样，其他数据集均指
 优化：使用临时文件缓存，避免60GB数据全部加载到内存导致OOM
 """
 import os
+
+# 默认镜像地址（用户可覆盖）
+DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
+
+# 关键修复：在导入 datasets/huggingface_hub 之前设置环境变量
+# 否则 HF 库初始化时会读取默认的 huggingface.co，导致后续设置无效
+if "HF_ENDPOINT" not in os.environ:
+    os.environ["HF_ENDPOINT"] = DEFAULT_HF_ENDPOINT
+    print(f"🌍 [Init] 自动设置 Hugging Face 镜像：{os.environ['HF_ENDPOINT']}")
+
 import random
 import math
 import json
@@ -64,19 +74,7 @@ ESTIMATE_SAMPLE_CNT = 1000
 STREAM_BATCH_SIZE = 1000
 OUTPUT_PREFIX = "cpt_general_training_data_parquet_"
 
-# 默认镜像地址（用户可覆盖）
-DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
 
-# 关键修复：在导入 datasets/huggingface_hub 之前设置环境变量
-# 否则 HF 库初始化时会读取默认的 huggingface.co，导致后续设置无效
-if "HF_ENDPOINT" not in os.environ:
-    os.environ["HF_ENDPOINT"] = DEFAULT_HF_ENDPOINT
-    print(f"🌍 [Init] 自动设置 Hugging Face 镜像：{os.environ['HF_ENDPOINT']}")
-
-from tqdm import tqdm
-import pandas as pd
-from datasets import load_dataset
-import argparse
 
 def get_effective_text_field(example_keys, candidate_fields):
     """从第一条示例匹配有效文本字段（流式模式专用）"""
@@ -96,7 +94,7 @@ def estimate_avg_sample_size(ds_config, cache_dir, estimate_cnt, token=None):
     
     ds_stream = load_dataset(
         ds_name,
-        config_name=config_name,
+        name=config_name,
         split="train",
         streaming=True,
         cache_dir=cache_dir,
@@ -108,7 +106,7 @@ def estimate_avg_sample_size(ds_config, cache_dir, estimate_cnt, token=None):
     
     ds_stream = load_dataset(
         ds_name,
-        config_name=config_name,
+        name=config_name,
         split="train",
         streaming=True,
         cache_dir=cache_dir,
@@ -149,9 +147,19 @@ def stream_collect_dataset_to_temp(ds_config, cache_dir, temp_dir, estimate_cnt,
     print(f"\n===== 开始处理：{ds_name} → 【{config_name}】子数据集 =====")
     print(f"📌 全局目标：{global_target/1024**3:.2f}GB | 单分片目标：{single_shard_target/1024**3:.2f}GB")
     
-    avg_sample_size, text_field = estimate_avg_sample_size(ds_config, cache_dir, estimate_cnt)
-    shard_required_samples = [math.ceil((t / avg_sample_size) * 1.1) for t in total_shard_target]
-    print(f"📌 各分片需有效样本：{[f'{x:,}' for x in shard_required_samples]}")
+    # 检查是否已有完整的临时文件，若有则跳过
+    temp_filenames = {}
+    all_shards_exist = True
+    for i in range(SPLIT_NUM):
+        fname = os.path.join(temp_dir, f"{config_name}_shard_{i}.jsonl")
+        temp_filenames[i] = fname
+        if not os.path.exists(fname) or os.path.getsize(fname) == 0:
+            all_shards_exist = False
+            break
+            
+    if all_shards_exist:
+        print(f"🎉 检测到 {config_name} 已存在完整的临时文件，跳过下载")
+        return temp_filenames
 
     # 准备临时文件句柄
     os.makedirs(temp_dir, exist_ok=True)
@@ -160,13 +168,14 @@ def stream_collect_dataset_to_temp(ds_config, cache_dir, temp_dir, estimate_cnt,
     
     for i in range(SPLIT_NUM):
         fname = os.path.join(temp_dir, f"{config_name}_shard_{i}.jsonl")
-        temp_files[i] = open(fname, 'w', encoding='utf-8')
+        # 增大 buffer 以减少磁盘 IO 频率
+        temp_files[i] = open(fname, 'w', encoding='utf-8', buffering=1024*1024)
         temp_filenames[i] = fname
 
     # 核心：streaming=True 实现流式下载
     ds_stream = load_dataset(
         ds_name,
-        config_name=config_name,
+        name=config_name,
         split="train",
         streaming=True,  # 关键：开启流式模式
         cache_dir=cache_dir,
@@ -175,26 +184,39 @@ def stream_collect_dataset_to_temp(ds_config, cache_dir, temp_dir, estimate_cnt,
     )
     
     current_shard = 0
-    collected_in_shard = 0
-    pbar = tqdm(total=sum(shard_required_samples), desc=f"🔄 采样{config_name}")
+    collected_in_shard_bytes = 0
+    collected_in_shard_count = 0
+    text_field = None
+    
+    # 使用字节大小作为进度条单位，更直观显示下载速度
+    pbar = tqdm(total=global_target, unit='B', unit_scale=True, desc=f"🔄 下载并采样 {config_name}")
 
     try:
         for example in ds_stream:
+            # 动态检测文本字段（首条数据）
+            if text_field is None:
+                text_field = get_effective_text_field(example, text_candidates)
+                print(f"✅ 自动检测到文本字段：{text_field}")
+
             text = example[text_field].strip()
             if not text:
                 continue
+            
+            text_bytes = len(text.encode("utf-8"))
             
             sample = {"text": text, "sample_type": sample_type}
             # 写入当前分片的临时文件
             temp_files[current_shard].write(json.dumps(sample, ensure_ascii=False) + "\n")
             
-            collected_in_shard += 1
-            pbar.update(1)
+            collected_in_shard_bytes += text_bytes
+            collected_in_shard_count += 1
+            pbar.update(text_bytes)
             
-            if collected_in_shard >= shard_required_samples[current_shard]:
-                print(f"\n✅ {config_name} 分片{current_shard}完成（{collected_in_shard:,}条），切换分片{current_shard+1}")
+            if collected_in_shard_bytes >= total_shard_target[current_shard]:
+                print(f"\n✅ {config_name} 分片{current_shard}完成（{collected_in_shard_count:,}条, {collected_in_shard_bytes/1024**3:.2f}GB），切换分片{current_shard+1}")
                 current_shard += 1
-                collected_in_shard = 0
+                collected_in_shard_bytes = 0
+                collected_in_shard_count = 0
                 # 关键：达标即停，不再下载后续数据
                 if current_shard >= SPLIT_NUM:
                     print(f"🎉 {config_name} 所有分片收集完毕，停止下载")
