@@ -88,7 +88,7 @@ def get_effective_text_field(example_keys, candidate_fields):
             return field
     raise ValueError("未找到有效文本字段，请检查配置")
 
-def estimate_avg_sample_size(ds_config, cache_dir, estimate_cnt):
+def estimate_avg_sample_size(ds_config, cache_dir, estimate_cnt, token=None):
     """流式预采样：仅从指定子数据集取样本，估算平均字节大小"""
     ds_name = ds_config["name"]
     config_name = ds_config["config_name"]
@@ -100,7 +100,8 @@ def estimate_avg_sample_size(ds_config, cache_dir, estimate_cnt):
         split="train",
         streaming=True,
         cache_dir=cache_dir,
-        trust_remote_code=True
+        # trust_remote_code=True,  # 已废弃，移除以避免报错
+        token=token
     )
     first_example = next(iter(ds_stream))
     text_field = get_effective_text_field(first_example, text_candidates)
@@ -111,7 +112,8 @@ def estimate_avg_sample_size(ds_config, cache_dir, estimate_cnt):
         split="train",
         streaming=True,
         cache_dir=cache_dir,
-        trust_remote_code=True
+        # trust_remote_code=True,  # 已废弃，移除以避免报错
+        token=token
     )
     total_bytes = 0
     valid_count = 0
