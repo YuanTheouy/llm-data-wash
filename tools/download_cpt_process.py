@@ -64,6 +64,9 @@ ESTIMATE_SAMPLE_CNT = 1000
 STREAM_BATCH_SIZE = 1000
 OUTPUT_PREFIX = "cpt_general_training_data_parquet_"
 
+# 默认镜像地址（用户可覆盖）
+DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
+
 def parse_args():
     parser = argparse.ArgumentParser(description="精准指定子数据集-流式处理-单文件比例严格")
     parser.add_argument("--output-dir", default=OUTPUT_DIR, type=str)
@@ -71,6 +74,8 @@ def parse_args():
     parser.add_argument("--temp-dir", default=TEMP_DIR, type=str, help="临时文件存储目录")
     parser.add_argument("--estimate-samples", default=ESTIMATE_SAMPLE_CNT, type=int)
     parser.add_argument("--stream-batch-size", default=STREAM_BATCH_SIZE, type=int)
+    parser.add_argument("--hf-token", type=str, help="Hugging Face Access Token (也可通过环境变量 HF_TOKEN 设置)")
+    parser.add_argument("--hf-endpoint", default=DEFAULT_HF_ENDPOINT, type=str, help="Hugging Face 镜像地址 (也可通过环境变量 HF_ENDPOINT 设置)")
     return parser.parse_args()
 
 def get_effective_text_field(example_keys, candidate_fields):
@@ -163,7 +168,8 @@ def stream_collect_dataset_to_temp(ds_config, cache_dir, temp_dir, estimate_cnt)
         split="train",
         streaming=True,  # 关键：开启流式模式
         cache_dir=cache_dir,
-        trust_remote_code=True
+        # trust_remote_code=True,  # 已废弃，移除以避免报错
+        token=token
     )
     
     current_shard = 0
@@ -253,6 +259,19 @@ def merge_temp_shards_and_save(all_ds_temp_files, output_dir, output_prefix):
 
 def main():
     args = parse_args()
+    
+    # 设置环境变量：HF Mirror
+    if args.hf_endpoint:
+        os.environ["HF_ENDPOINT"] = args.hf_endpoint
+        print(f"🌍 使用 Hugging Face 镜像：{os.environ['HF_ENDPOINT']}")
+    
+    # 获取 Token：优先命令行参数，其次环境变量
+    hf_token = args.hf_token or os.environ.get("HF_TOKEN")
+    if hf_token:
+        print("🔑 已检测到 Hugging Face Token")
+    else:
+        print("⚠️ 未检测到 Token，部分受限数据集可能会下载失败")
+
     os.makedirs(args.cache_dir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.temp_dir, exist_ok=True)
@@ -266,7 +285,8 @@ def main():
                 ds_config=ds_config,
                 cache_dir=args.cache_dir,
                 temp_dir=args.temp_dir,
-                estimate_cnt=args.estimate_samples
+                estimate_cnt=args.estimate_samples,
+                token=hf_token
             )
             all_ds_temp_files[ds_config["config_name"]] = temp_files_map
         except Exception as e:
