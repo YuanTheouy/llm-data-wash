@@ -67,16 +67,16 @@ OUTPUT_PREFIX = "cpt_general_training_data_parquet_"
 # 默认镜像地址（用户可覆盖）
 DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="精准指定子数据集-流式处理-单文件比例严格")
-    parser.add_argument("--output-dir", default=OUTPUT_DIR, type=str)
-    parser.add_argument("--cache-dir", default=CACHE_DIR, type=str)
-    parser.add_argument("--temp-dir", default=TEMP_DIR, type=str, help="临时文件存储目录")
-    parser.add_argument("--estimate-samples", default=ESTIMATE_SAMPLE_CNT, type=int)
-    parser.add_argument("--stream-batch-size", default=STREAM_BATCH_SIZE, type=int)
-    parser.add_argument("--hf-token", type=str, help="Hugging Face Access Token (也可通过环境变量 HF_TOKEN 设置)")
-    parser.add_argument("--hf-endpoint", default=DEFAULT_HF_ENDPOINT, type=str, help="Hugging Face 镜像地址 (也可通过环境变量 HF_ENDPOINT 设置)")
-    return parser.parse_args()
+# 关键修复：在导入 datasets/huggingface_hub 之前设置环境变量
+# 否则 HF 库初始化时会读取默认的 huggingface.co，导致后续设置无效
+if "HF_ENDPOINT" not in os.environ:
+    os.environ["HF_ENDPOINT"] = DEFAULT_HF_ENDPOINT
+    print(f"🌍 [Init] 自动设置 Hugging Face 镜像：{os.environ['HF_ENDPOINT']}")
+
+from tqdm import tqdm
+import pandas as pd
+from datasets import load_dataset
+import argparse
 
 def get_effective_text_field(example_keys, candidate_fields):
     """从第一条示例匹配有效文本字段（流式模式专用）"""
@@ -258,6 +258,17 @@ def merge_temp_shards_and_save(all_ds_temp_files, output_dir, output_prefix):
     total_size = sum(os.path.getsize(os.path.join(output_dir, f)) for f in os.listdir(output_dir) if f.endswith(".parquet"))
     print(f"\n===== 所有文件生成完成！ =====")
     print(f"✅ 全局总大小：{total_size/1024**3:.2f}GB（目标60GB）")
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="精准指定子数据集-流式处理-单文件比例严格")
+    parser.add_argument("--output-dir", default=OUTPUT_DIR, type=str)
+    parser.add_argument("--cache-dir", default=CACHE_DIR, type=str)
+    parser.add_argument("--temp-dir", default=TEMP_DIR, type=str, help="临时文件存储目录")
+    parser.add_argument("--estimate-samples", default=ESTIMATE_SAMPLE_CNT, type=int)
+    parser.add_argument("--stream-batch-size", default=STREAM_BATCH_SIZE, type=int)
+    parser.add_argument("--hf-token", type=str, help="Hugging Face Access Token (也可通过环境变量 HF_TOKEN 设置)")
+    parser.add_argument("--hf-endpoint", default=DEFAULT_HF_ENDPOINT, type=str, help="Hugging Face 镜像地址 (也可通过环境变量 HF_ENDPOINT 设置)")
+    return parser.parse_args()
 
 def main():
     args = parse_args()
